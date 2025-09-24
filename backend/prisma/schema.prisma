@@ -1,0 +1,36 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+model User {
+  id    String  @id @default(uuid())
+  email String  @unique
+  alerts Alert[]
+}
+
+model Alert {
+  id        String   @id @default(uuid())
+  userId    String
+  user      User     @relation(fields: [userId], references: [id])
+  coinId    String
+  vsCurrency String  @default("USD")  
+  type      String
+  threshold Float
+  enabled   Boolean  @default(true)
+  createdAt DateTime @default(now())
+  histories AlertHistory[]
+}
+
+
+model AlertHistory {
+  id      String   @id @default(uuid())
+  alertId String
+  alert   Alert    @relation(fields: [alertId], references: [id])
+  price   Float
+  firedAt DateTime @default(now())
+}
