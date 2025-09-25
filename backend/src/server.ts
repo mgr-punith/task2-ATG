@@ -11,14 +11,12 @@ const redis = new Redis();
 
 let currentUserId: string;
 
-//alerting the user
+// Create or get default user
 async function getOrCreateUser() {
   let user = await prisma.user.findFirst();
   if (!user) {
     user = await prisma.user.create({
-      data: {
-        email: `guest-${Date.now()}@example.com`,
-      },
+      data: { email: `guest-${Date.now()}@example.com` },
     });
     console.log("Created new user:", user.email);
   }
@@ -31,22 +29,43 @@ getOrCreateUser().then((id) => {
 });
 
 io.on("connection", async (socket) => {
-  console.log("socket connected", socket.id);
+  console.log("Client connected:", socket.id);
 
-  // Send cached prices to the new client immediately
+  // Send cached prices immediately
   const cachedPrices = await redis.get("prices");
   if (cachedPrices) {
     socket.emit("price_update", JSON.parse(cachedPrices));
   }
 
+  // Send active alerts for this user
+  if (currentUserId) {
+    const activeAlerts = await prisma.alert.findMany({
+      where: { userId: currentUserId, enabled: true },
+    });
+
+    socket.emit(
+      "load_alerts",
+      activeAlerts.map((a) => ({
+        id: a.id,
+        coin: a.coinId,
+        threshold: a.threshold.toString(),
+        type: a.type,
+        triggered: false,
+      }))
+    );
+  }
+
+  // Handle new alert creation
   socket.on("set_alert", async (data) => {
     console.log("Received new alert request:", data);
+
     try {
       if (!currentUserId) {
         console.error("User ID not available yet. Alert not saved.");
         return;
       }
-      await prisma.alert.create({
+
+      const alert = await prisma.alert.create({
         data: {
           userId: currentUserId,
           coinId: data.coin,
@@ -56,7 +75,24 @@ io.on("connection", async (socket) => {
           vsCurrency: "usd",
         },
       });
+
       console.log("Alert saved successfully!");
+
+      // Send updated list of alerts back to this client
+      const updatedAlerts = await prisma.alert.findMany({
+        where: { userId: currentUserId, enabled: true },
+      });
+
+      socket.emit(
+        "load_alerts",
+        updatedAlerts.map((a) => ({
+          id: a.id,
+          coin: a.coinId,
+          threshold: a.threshold.toString(),
+          type: a.type,
+          triggered: false,
+        }))
+      );
     } catch (error) {
       console.error("Failed to save alert:", error);
     }
@@ -71,21 +107,26 @@ async function fetchPricesFromApi() {
   return res.json();
 }
 
+// Check prices every 12s
 setInterval(async () => {
   try {
     let data;
-    // Check for cached data first
+
+    // Use cached data if available
     const cachedData = await redis.get("prices");
     if (cachedData) {
       data = JSON.parse(cachedData);
     } else {
-      // If no cache, fetch from API
+      // Fetch fresh data
       data = await fetchPricesFromApi();
       console.log("Prices fetched from API:", data);
       await redis.set("prices", JSON.stringify(data), "EX", 30);
     }
 
+    // Send to all clients
     io.emit("price_update", data);
+
+    // Check alerts in DB
     const alerts = await prisma.alert.findMany({ where: { enabled: true } });
     console.log(`Checking ${alerts.length} alerts...`);
 
@@ -115,11 +156,14 @@ setInterval(async () => {
           alert.type === "PRICE_ABOVE" ? "rose above" : "fell below"
         } ${alert.threshold}`;
         console.log("Triggered:", message);
+
         io.emit("alert_triggered", {
           coin: coinId,
           price,
           message,
         });
+
+        // Save to history + disable alert
         await prisma.alertHistory.create({
           data: { alertId: alert.id, price },
         });
@@ -132,9 +176,8 @@ setInterval(async () => {
   } catch (err) {
     console.error("Error in price check loop:", err);
   }
-}, 30000);
+}, 22000);
 
 server.listen(4000, () =>
   console.log("Server running on http://localhost:4000")
 );
-

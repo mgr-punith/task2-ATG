@@ -1,11 +1,9 @@
 "use client";
 
-import io from "socket.io-client";
+import socket from "./socket";
 import { JSX, useEffect, useState } from "react";
 import { FaBitcoin, FaEthereum } from "react-icons/fa";
 import { SiSolana, SiDogecoin } from "react-icons/si";
-
-const socket = io("http://localhost:4000");
 
 type PriceData = {
   usd: number;
@@ -28,7 +26,7 @@ type ActiveAlert = {
 export default function Dashboard() {
   const [prices, setPrices] = useState<Record<string, PriceData>>({});
   const [prevPrices, setPrevPrices] = useState<Record<string, number>>({});
-  const [alerts, setAlerts] = useState<Alert[]>([]);
+  const [alertsHistory, setAlertsHistory] = useState<Alert[]>([]);
   const [activeAlerts, setActiveAlerts] = useState<ActiveAlert[]>([]);
   const [newAlert, setNewAlert] = useState({
     coin: "",
@@ -44,39 +42,46 @@ export default function Dashboard() {
   };
 
   useEffect(() => {
-    // Correctly updates prevPrices using a function to get the latest `prices` state.
+    socket.on("connect", () => {
+      console.log("Frontend connected:", socket.id);
+    });
+
     socket.on("price_update", (newPrices) => {
       setPrevPrices(prices);
       setPrices(newPrices);
     });
 
     socket.on("alert_triggered", (data: Alert) => {
-      setAlerts((prev) => [data, ...prev]);
+      // Add to history
+      setAlertsHistory((prev) => [data, ...prev]);
+
+      // Remove from active alerts (since backend disables it)
       setActiveAlerts((prev) =>
-        prev.map((alert) =>
-          // Use parseFloat to compare the string threshold with the number price.
-          // This ensures the comparison is correct.
-          alert.coin === data.coin && parseFloat(alert.threshold) === data.price
-            ? { ...alert, triggered: true }
-            : alert
+        prev.filter(
+          (alert) =>
+            !(
+              alert.coin === data.coin &&
+              parseFloat(alert.threshold) === data.price
+            )
         )
       );
+    });
+
+    socket.on("load_alerts", (loadedAlerts: ActiveAlert[]) => {
+      console.log("Loaded active alerts from server:", loadedAlerts);
+      setActiveAlerts(loadedAlerts);
     });
 
     return () => {
       socket.off("price_update");
       socket.off("alert_triggered");
+      socket.off("load_alerts");
     };
   }, [prices]);
 
   const handleSetAlert = (e: React.FormEvent) => {
     e.preventDefault();
     if (!newAlert.coin || !newAlert.threshold) return;
-
-    const newId = Date.now().toString();
-    const alertToAdd = { ...newAlert, id: newId, triggered: false };
-    setActiveAlerts((prev) => [...prev, alertToAdd]);
-
     socket.emit("set_alert", newAlert);
     setNewAlert({ coin: "", threshold: "", type: "PRICE_ABOVE" });
   };
@@ -92,14 +97,14 @@ export default function Dashboard() {
       </header>
 
       <div className="flex flex-col lg:flex-row gap-8">
-        {/* Main Content (Prices and Set Alert Form) */}
+        {/* Left: Prices + Set Alert */}
         <div className="flex-1">
           {/* Price Cards */}
           <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-6 mb-10">
             {Object.entries(prices).map(([coin, info]) => {
               const prevPrice = prevPrices[coin];
               const priceChanged = prevPrice !== info.usd;
-              const alertTriggered = alerts.some(
+              const alertTriggered = alertsHistory.some(
                 (a) => a.coin === coin && a.price === info.usd
               );
 
@@ -137,8 +142,11 @@ export default function Dashboard() {
 
           {/* Set Alert Form */}
           <div className="bg-gray-800 p-6 rounded-xl shadow-lg max-w-md mx-auto">
-            <h2 className="text-xl font-bold mb-4">Set a New Alert</h2>
+            <h2 className="text-xl font-bold mb-4 text-blue-400">
+              Set a New Alert
+            </h2>
             <form onSubmit={handleSetAlert} className="space-y-4">
+              {/* Coin */}
               <div>
                 <label className="block text-sm font-medium text-gray-400 mb-1">
                   Coin
@@ -161,6 +169,7 @@ export default function Dashboard() {
                 </select>
               </div>
 
+              {/* Threshold */}
               <div>
                 <label className="block text-sm font-medium text-gray-400 mb-1">
                   Threshold USD
@@ -178,6 +187,7 @@ export default function Dashboard() {
                 />
               </div>
 
+              {/* Condition */}
               <div>
                 <label className="block text-sm font-medium text-gray-400 mb-1">
                   Condition
@@ -204,15 +214,18 @@ export default function Dashboard() {
           </div>
         </div>
 
-        {/* Right Side: Active Alerts Box */}
-        <div className="w-full lg:w-1/3">
-          <div className="bg-gray-800 p-6 rounded-xl shadow-lg">
-            <h2 className="text-xl font-bold mb-4">Active Alerts</h2>
-            {activeAlerts.length === 0 ? (
-              <p className="text-gray-400">No alerts are set yet.</p>
-            ) : (
-              <div className="space-y-4">
-                {activeAlerts.map((alert) => (
+        {/* Right: Active Alerts + History */}
+        <div className="w-full lg:w-1/3 flex flex-col gap-8 h-[calc(100vh-5rem)]">
+          {/* Active Alerts */}
+          <div className="bg-gray-800 p-6 rounded-xl shadow-lg flex flex-col h-1/2">
+            <h2 className="text-xl font-bold mb-4 text-blue-400">
+              Active Alerts
+            </h2>
+            <div className="flex-1 overflow-y-auto pr-2 space-y-4">
+              {activeAlerts.length === 0 ? (
+                <p className="text-gray-400">No alerts are set yet.</p>
+              ) : (
+                activeAlerts.map((alert) => (
                   <div
                     key={alert.id}
                     className={`p-4 rounded-lg transition-colors duration-300 ${
@@ -226,25 +239,22 @@ export default function Dashboard() {
                       {alert.type === "PRICE_ABOVE" ? "Above" : "Below"}: $
                       {alert.threshold}
                     </p>
-                    {alert.triggered && (
-                      <p className="text-sm text-green-200 mt-1">
-                        Alert Triggered!
-                      </p>
-                    )}
                   </div>
-                ))}
-              </div>
-            )}
+                ))
+              )}
+            </div>
           </div>
 
-          {/* Triggered Alerts History */}
-          <div className="mt-8">
-            <h2 className="text-xl font-bold mb-4">Triggered History</h2>
-            <div className="space-y-3">
-              {alerts.length === 0 ? (
+          {/* Triggered History */}
+          <div className="bg-gray-800 p-6 rounded-xl shadow-lg flex flex-col h-1/2">
+            <h2 className="text-xl font-bold mb-4 text-red-400">
+              Triggered History
+            </h2>
+            <div className="flex-1 overflow-y-auto pr-2 space-y-3">
+              {alertsHistory.length === 0 ? (
                 <p className="text-gray-400">No alerts triggered yet.</p>
               ) : (
-                alerts.map((a, i) => (
+                alertsHistory.map((a, i) => (
                   <div
                     key={i}
                     className="p-4 bg-red-800 rounded-lg shadow-md border-l-4 border-red-500"
